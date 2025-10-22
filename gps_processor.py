@@ -17,7 +17,7 @@ class GPSDataProcessor:
     A class to process various GPS data file formats including GPX, KML, and others.
     """
     
-    def __init__(self, input_dir: str, time_range: Optional[Tuple[dtime, dtime]] = None, tzinfo: Optional[timezone] = None, speed_unit: str = 'knots'):
+    def __init__(self, input_dir: str, time_range: Optional[Tuple[dtime, dtime]] = None, tzinfo: Optional[timezone] = None, speed_unit: str = 'knots', max_accel_ms2: float = 5.0):
         """
         Initialize the GPSDataProcessor with the input directory containing GPS files.
         
@@ -32,6 +32,7 @@ class GPSDataProcessor:
         self.time_range = time_range
         self.tzinfo = tzinfo or datetime.now().astimezone().tzinfo
         self.speed_unit = speed_unit.lower()
+        self.max_accel_ms2 = float(max_accel_ms2)
     
     def get_gps_files(self) -> List[Path]:
         """
@@ -286,6 +287,35 @@ class GPSDataProcessor:
             return None
         return (tb - ta).total_seconds()
 
+    def _filter_by_acceleration(self, points: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        if len(points) < 3:
+            return points
+        kept: List[Dict[str, Any]] = [points[0]]
+        for i in range(1, len(points) - 1):
+            p0 = kept[-1]
+            p1 = points[i]
+            p2 = points[i + 1]
+            dt1 = self._pair_time_s(p0, p1) or 0.0
+            dt2 = self._pair_time_s(p1, p2) or 0.0
+            if dt1 <= 0 or dt2 <= 0:
+                kept.append(p1)
+                continue
+            d1 = self._pair_distance_m(p0, p1)
+            d2 = self._pair_distance_m(p1, p2)
+            v1 = d1 / dt1
+            v2 = d2 / dt2
+            dt_mean = 0.5 * (dt1 + dt2)
+            if dt_mean <= 0:
+                kept.append(p1)
+                continue
+            a = (v2 - v1) / dt_mean
+            if abs(a) <= self.max_accel_ms2:
+                kept.append(p1)
+            else:
+                continue
+        kept.append(points[-1])
+        return kept
+
     # ===== Units helpers =====
     def _kmh_to_unit(self, kmh: float) -> float:
         u = self.speed_unit
@@ -429,6 +459,7 @@ class GPSDataProcessor:
         # Flatten points and apply time window
         pts = self._collect_points(gpx_data)
         pts = self._filter_by_time_window(pts)
+        pts = self._filter_by_acceleration(pts)
         if len(pts) < 2:
             return {
                 'total_distance_m': 0.0,
@@ -608,22 +639,25 @@ class GPSDataProcessor:
 
         header = (
             "<tr>"
-            "<th data-idx='0'>File</th>"
-            "<th data-idx='1'>Total Distance (km)</th>"
-            f"<th data-idx='2'>Max 2s ({unit_lbl})</th>"
-            f"<th data-idx='3'>Top 5 x 10s ({unit_lbl})</th>"
-            f"<th data-idx='4'>100 m ({unit_lbl})</th>"
-            f"<th data-idx='5'>500 m ({unit_lbl})</th>"
-            f"<th data-idx='6'>1 NM ({unit_lbl})</th>"
-            f"<th data-idx='7'>Avg >=4 km/h ({unit_lbl})</th>"
-            f"<th data-idx='8'>Alpha 500 ({unit_lbl})</th>"
+            "<th title='Row number (fixed)'>#</th>"
+            "<th>File</th>"
+            "<th>Total Distance (km)</th>"
+            f"<th>Max 2s ({unit_lbl})</th>"
+            f"<th>Top 5 x 10s ({unit_lbl})</th>"
+            f"<th>100 m ({unit_lbl})</th>"
+            f"<th>500 m ({unit_lbl})</th>"
+            f"<th>1 NM ({unit_lbl})</th>"
+            f"<th>Avg >=4 km/h ({unit_lbl})</th>"
+            f"<th>Alpha 500 ({unit_lbl})</th>"
             "</tr>"
         )
+        idx = 1
         for fname, data in results.items():
             m = data.get('metrics', {})
             top5 = ", ".join(f"{self._kmh_to_unit(v):.2f}" for v in m.get('top5_10s_kmh', [])) if m else ""
             row = (
                 f"<tr>"
+                f"<td class='rownum' data-index='{idx}'>{idx}</td>"
                 f"<td>{fname}</td>"
                 f"<td data-num='1'>{(m.get('total_distance_m', 0.0)/1000):.3f}</td>"
                 f"<td data-num='1'>{self._kmh_to_unit(m.get('max_2s_kmh', 0.0)):.2f}</td>"
@@ -636,12 +670,14 @@ class GPSDataProcessor:
                 f"</tr>"
             )
             rows.append(row)
+            idx += 1
         html = (
             "<!DOCTYPE html>\n<html><head><meta charset='utf-8'><title>GPS Metrics</title>"
-            "<style>body{font-family:Arial,sans-serif;padding:20px;}table{border-collapse:collapse;width:100%;}th,td{border:1px solid #ddd;padding:8px;text-align:center;}th{background:#f4f4f4;position:sticky;top:0;cursor:pointer;}tr:nth-child(even){background:#fafafa;}caption{caption-side:top;text-align:left;margin-bottom:10px;color:#444;}small.sub{display:block;margin-top:4px;color:#666;}</style>"
+            "<style>body{font-family:Arial,sans-serif;padding:20px;}table{border-collapse:collapse;width:100%;}th,td{border:1px solid #ddd;padding:8px;text-align:center;}th{background:#f4f4f4;position:sticky;top:0;cursor:pointer;}tr:nth-child(even){background:#fafafa;}caption{caption-side:top;text-align:left;margin-bottom:10px;color:#444;}small.sub{display:block;margin-top:4px;color:#666;}td.rownum, th:first-child{width:60px;cursor:default;}</style>"
             "<script>\n"
-            "function sortTable(n){const table=document.getElementById('metrics');const tbody=table.tBodies[0];const rows=Array.from(tbody.rows);let dir=table.getAttribute('data-sort-dir')==='asc'?'desc':'asc';const isNum=(cell)=>cell.hasAttribute('data-num');rows.sort((a,b)=>{const A=a.cells[n].innerText.trim();const B=b.cells[n].innerText.trim();if(isNum(a.cells[n])||isNum(b.cells[n])){const x=parseFloat(A)||0;const y=parseFloat(B)||0;return dir==='asc'?x-y:y-x;}return dir==='asc'?A.localeCompare(B):B.localeCompare(A);});tbody.innerHTML='';rows.forEach(r=>tbody.appendChild(r));table.setAttribute('data-sort-dir',dir);}\n"
-            "window.addEventListener('DOMContentLoaded',()=>{document.querySelectorAll('#metrics thead th').forEach((th,i)=>{th.addEventListener('click',()=>sortTable(i));});});\n"
+            "function renumber(){const tbody=document.getElementById('metrics').tBodies[0];Array.from(tbody.rows).forEach((r,i)=>{r.cells[0].textContent=String(i+1);});}\n"
+            "function sortTable(n){if(n===0){return;}const table=document.getElementById('metrics');const tbody=table.tBodies[0];let rows=Array.from(tbody.rows);let dir=table.getAttribute('data-sort-dir')==='asc'?'desc':'asc';const isNum=(cell)=>cell.hasAttribute('data-num');rows.sort((a,b)=>{const A=a.cells[n].innerText.trim();const B=b.cells[n].innerText.trim();if(isNum(a.cells[n])||isNum(b.cells[n])){const x=parseFloat(A)||0;const y=parseFloat(B)||0;return dir==='asc'?x-y:y-x;}return dir==='asc'?A.localeCompare(B):B.localeCompare(A);});tbody.innerHTML='';rows.forEach(r=>tbody.appendChild(r));table.setAttribute('data-sort-dir',dir);renumber();}\n"
+            "window.addEventListener('DOMContentLoaded',()=>{document.querySelectorAll('#metrics thead th').forEach((th,i)=>{th.addEventListener('click',()=>sortTable(i));});renumber();});\n"
             "</script>"
             "</head><body>"
             f"<h2>GPS Metrics<small class='sub'>{subtitle}</small></h2>"
@@ -702,12 +738,13 @@ def main():
     parser.add_argument('--html', dest='html', default=None, help='Output HTML file path (default: <directory>/gps_metrics.html)')
     parser.add_argument('--units', dest='units', default='knots', choices=['knots','kmh','km/h','mph','ms','m/s'], help='Units for speed metrics (default: knots)')
     parser.add_argument('--json', dest='json', default='gps_data_summary.json', help='Output JSON file path')
+    parser.add_argument('--accel-max', dest='accel_max', type=float, default=5.0, help='Maximum allowed acceleration (m/s^2) for outlier filtering')
     args = parser.parse_args()
 
     try:
         tr = parse_time_range(args.time_range)
         tzinfo = parse_timezone(args.tz)
-        processor = GPSDataProcessor(args.directory, time_range=tr, tzinfo=tzinfo, speed_unit=args.units)
+        processor = GPSDataProcessor(args.directory, time_range=tr, tzinfo=tzinfo, speed_unit=args.units, max_accel_ms2=args.accel_max)
         results = processor.process_all_files()
 
         # Save JSON
@@ -717,7 +754,33 @@ def main():
 
         # Save HTML
         html = processor.results_to_html(results)
-        html_out = args.html or str((Path(args.directory) / 'gps_metrics.html').resolve())
+        if args.html:
+            html_out = args.html
+        else:
+            # Derive earliest local date from data
+            min_ts = None
+            for data in results.values():
+                for track in data.get('tracks', []):
+                    for seg in track.get('segments', []):
+                        for p in seg:
+                            t = p.get('time')
+                            if not t:
+                                continue
+                            dt = processor._parse_dt(t) if isinstance(t, str) else t
+                            if not dt:
+                                continue
+                            if dt.tzinfo is None:
+                                dt = dt.replace(tzinfo=timezone.utc)
+                            lt = dt.astimezone(processor.tzinfo)
+                            if min_ts is None or lt < min_ts:
+                                min_ts = lt
+            date_part = f"_{min_ts.strftime('%Y%m%d')}" if min_ts else ''
+            # Default filename, optionally suffixed with time-range if provided
+            time_part = ''
+            if tr:
+                st, et = tr
+                time_part = f"_{st.strftime('%H%M')}-{et.strftime('%H%M')}"
+            html_out = str((Path(args.directory) / f"gps_metrics{date_part}{time_part}.html").resolve())
         with open(html_out, 'w', encoding='utf-8') as f:
             f.write(html)
         print(f"Saved HTML: {html_out}")
