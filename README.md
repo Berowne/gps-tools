@@ -28,6 +28,25 @@ Example:
 python gps_processor.py "C:\Path\To\GPS\Files"
 ```
 
+### Time range filter and timezone offset
+
+- **Local time range filter**: Limit processing to a clock-time window using `--time-range HH:MM-HH:MM`.
+  - Example: `--time-range 12:34-13:45`
+  - Windows that cross midnight are supported, e.g., `--time-range 23:30-00:30`.
+
+- **Timezone offset**: Choose the local timezone for interpreting the time window with `--timezone`.
+  - Accepts formats like `GMT+11`, `GMT-2`, or with minutes `GMT+10:30` (also `UTC+...` works).
+  - Defaults to your system timezone if not specified.
+
+Examples:
+```bash
+# Filter between 1:00pm and 1:30pm in GMT+11, output HTML next to the input folder
+python gps_processor.py ".\sample\" --time-range 13:00-13:30 --timezone GMT+11
+
+# Crossing midnight in UTC
+python gps_processor.py ".\sample\" --time-range 23:30-00:30 --timezone UTC
+```
+
 ## Output
 
 The tool will:
@@ -35,6 +54,7 @@ The tool will:
 2. Parse each file and extract relevant data
 3. Display a summary of the processed files
 4. Save detailed results to `gps_data_summary.json`
+5. Save a sortable HTML table to `<directory>/gps_metrics.html` by default (override with `--html`)
 
 ## Example Output
 
